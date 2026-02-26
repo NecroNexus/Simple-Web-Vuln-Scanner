@@ -1,99 +1,88 @@
-# Beginner-Friendly Web Vulnerability Scanner 🛡️
+# EduSec: Academic Web Vulnerability Scanner 🛡️
 
-A flexible, Python-based web vulnerability scanner designed to detect common security flaws and open ports. Built for educational purposes, this tool provides clear, actionable explanations of each vulnerability type as it scans, making it a great learning resource and an excellent addition to a cybersecurity portfolio.
-
-## Key Features ✨
-
-- **SQL Injection (SQLi) Detection**: Tests for basic SQLi vulnerabilities by injecting common payloads and analyzing webpage responses for database syntax errors.
-- **Cross-Site Scripting (XSS) Checks**: Scans for reflected XSS by injecting test scripts into URL parameters and checking if the resulting HTML reflects the unescaped script.
-- **Port Scanning**: Performs a customized TCP port scan to identify open common service ports (e.g., 80, 443, 22, 21), highlighting potential attack surfaces.
-- **Educational Explanations**: Prints out clear, contextual explanations of each vulnerability type when found during the scan.
-- **Actionable Summary**: Generates a clean, easy-to-read recruiter-friendly summary at the end of every scan detailing overall findings.
-- **Comprehensive Logging**: Automatically logs all scan activities and results to a local `scan_report.txt` file (designed for easy integration with external Audit Loggers, like a Blockchain Immutable Logger).
-- **CLI Support (`argparse`)**: Run specific scanning modules using command-line arguments to demonstrate tool-like architecture.
+A Python-based, advanced web vulnerability scanner engineered for academic research, security auditing, and ethical hacking education. This tool demonstrates clean software architecture (OOP) while detecting common security misconfigurations and vulnerabilities.
 
 ---
 
-## 🚀 Getting Started
+## 🌟 Technical Highlights
 
-### Prerequisites
+This project is built using a professional-grade, modular architecture (`WebScanner` class) showcasing the following capabilities:
 
-Ensure you have Python 3.x installed on your system.
-Install the required HTTP library (`requests`):
+### 1. Advanced Vulnerability Detection
+- **Smarter SQL Injection (SQLi)**: Uses iterated payload injection and response comparison against known backend database error signatures, minimizing false positives.
+- **Reflected XSS Analysis**: Validates if raw payloads survive output encoding by checking `Content-Type` headers alongside payload reflection.
 
+### 2. Infrastructure & Configuration Auditing
+- **HTTP Security Header Analysis**: Scans responses for critical missing headers (e.g., `Content-Security-Policy`, `Strict-Transport-Security`, `X-Frame-Options`).
+- **Endpoint & Directory Enumeration**: Performs active discovery of common hidden paths (`/admin`, `/backup`, `/.git`) using low-bandwidth `HEAD` requests.
+- **TCP Port Discovery**: Multithreaded socket scanning to map the external attack surface of the host.
+
+### 3. Professional Tool Architecture
+- **Evasion & Realism**: Implements automated User-Agent rotation to simulate legitimate browser traffic and bypass basic behavioral filters.
+- **Rate Limiting & Safety**: Built-in `--delay` functionality to throttle requests, preventing accidental Denial of Service (DoS) during testing.
+- **Structured Reporting**: Exports findings in both human-readable Text and structured JSON formats, enabling easy integration into automated pipelines.
+- **Extensible CLI**: Powered by `argparse`, allowing granular control over which scanning modules to execute.
+
+---
+
+## 🚀 Usage Guide
+
+### Installation
+Ensure Python 3.x is installed, then install the required `requests` library:
 ```bash
 pip install requests
 ```
 
-### Usage
+### Command Line Interface (CLI)
 
-You can run the script in interactive mode or utilize the command-line interface (CLI) to specify which scans to perform.
-
-#### Interactive Mode
-If you run the script directly, it will prompt you for the target URL and automatically run all available scans:
+The tool provides a modular CLI interface mimicking enterprise scanners. Use `-h` or `--help` to view all options:
 
 ```bash
-python scanner.py
+python scanner.py -h
 ```
 
-#### CLI Mode
-Use command-line flags to target specific vulnerability checks. This enables automated scripting and tight integration with other cybersecurity tools:
+**Examples:**
 
-```bash
-# Display the help menu
-python scanner.py --help
+1. **Full Academic Audit (Default)**
+   *Runs all modules with default 1-second request delays and outputs a text summary.*
+   ```bash
+   python scanner.py http://example.com --all
+   ```
 
-# Run ALL scans against a specific target
-python scanner.py http://example.com --all
+2. **Targeted Reconnaissance (Headers & Endpoints only)**
+   ```bash
+   python scanner.py http://example.com --headers --enum
+   ```
 
-# Run ONLY the SQL Injection module
-python scanner.py http://example.com --sqli
-
-# Run both the XSS module and the Port Scanner
-python scanner.py http://example.com --xss --ports
-```
+3. **Intensive Vulnerability Scan with Custom Rate Limiting & JSON Output**
+   *Runs SQLi and XSS checks with a 0.5s delay, outputting results to a machine-readable JSON file.*
+   ```bash
+   python scanner.py http://example.com --sqli --xss --delay 0.5 --output json
+   ```
 
 ---
 
-## 📝 Example Output
+## 💼 Resume & Interview Guide
 
-When running a complete scan, the terminal will display real-time progress, educational insights, and conclude with a concise summary:
+If you are presenting this project in a portfolio or interview, here is how to frame it:
 
-```text
-==================================================
-WARNING: This tool is for educational and authorized 
-testing only. Unauthorized scanning is illegal.
-==================================================
-...
-[+] Vulnerability Found: Potential Cross-Site Scripting (XSS)!
-    Payload used: <script>alert('XSS_Test')</script>
-    Target URL: http://testphp.vulnweb.com?q=<script>alert('XSS_Test')</script>
+### Suggested Resume Bullet Points
+*   **"Architected a scalable, Python-based security auditing tool utilizing Object-Oriented principles, capable of detecting SQL Injection, Reflected XSS, and critical security misconfigurations."**
+*   **"Implemented ethical testing guardrails (rate limiting) and evasion techniques (User-Agent rotation) to enable safe, non-disruptive security assessments."**
+*   **"Designed an extensible JSON reporting engine to facilitate automated pipeline integration (e.g., SIEM ingestion, Blockchain Audit Logging)."**
 
-[!] Cross-Site Scripting (XSS) Alert!
-Explanation: XSS happens when a web application includes untrusted user data...
-...
-==================================================
-                 Scan Summary                     
-==================================================
-- SQL Injection: Not Detected
-- XSS: Detected
-- Open Ports: 25, 80, 110
-
-[i] Full report saved to 'scan_report.txt'
-```
+### Interview Talking Points
+1. **Why Python?**: Contrast Python's rapid prototyping capabilities (built-in `socket` and `urllib` libraries + the powerful `requests` ecosystem) against heavier languages.
+2. **Handling False Positives**: Explain how you refined the XSS checker to verify the `Content-Type: text/html` header—ensuring that payloads returned in JSON APIs aren't incorrectly flagged as executable XSS by a browser.
+3. **The Importance of JSON Output**: Discuss how modern security is about the "pipeline." Exporting JSON allows the scan results to be cryptographically hashed and stored on a Blockchain or ingested into a SIEM (like Splunk) for immutable auditing.
 
 ---
 
-## 📁 File Structure
+## ⚠️ Academic Disclaimer
 
-- `scanner.py`: The main Python script containing the scanning logic and CLI setup.
-- `scan_report.txt`: (Auto-generated) The immutable local text log where all scans and findings are appended and recorded.
+**WARNING: ACADEMIC SECURITY RESEARCH TOOL**
 
----
+This tool is strictly for educational and authorized testing purposes only. The developer assumes no liability and is not responsible for any misuse, damage, or legal consequences caused by its usage. 
 
-## ⚠️ Disclaimer
+Always ensure you have explicit, written consent from the owner before scanning any network, application, or system. Unauthorized network scanning is a severe criminal offense.
 
-**This tool is strictly for educational and authorized testing purposes only.** 
-The creator of this tool assumes no liability and is not responsible for any misuse, damage, or legal consequences caused by its usage. Always ensure you have explicit written permission before scanning any website, server, or network that you do not own.
-
-*Unauthorized network scanning and exploitation is a severe criminal offense.*
