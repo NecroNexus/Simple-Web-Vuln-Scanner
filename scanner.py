@@ -1,267 +1,427 @@
 import argparse
 import requests
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import datetime
+import json
+import time
+import random
+import sys
 
-# --- Vulnerability Explanations ---
-SQLI_EXPLANATION = """
-[!] SQL Injection (SQLi) Alert!
-Explanation: SQL Injection occurs when user input is improperly sanitized before being used 
-in a database query. An attacker can input special characters (like quotes) to manipulate 
-the query. This could allow them to bypass authentication, access sensitive database information, 
-or modify/delete data.
-"""
-
-XSS_EXPLANATION = """
-[!] Cross-Site Scripting (XSS) Alert!
-Explanation: XSS happens when a web application includes untrusted user data in a web page 
-without proper validation or escaping. This allows an attacker to inject and execute malicious 
-scripts (like JavaScript) in the browser of anyone visiting the compromised page. Attackers 
-use this to steal session cookies, deface websites, or redirect users.
-"""
-
-PORT_EXPLANATION = """
-[*] Port Scanning Context:
-Explanation: A port scan checks which network ports are actively listening on a server. 
-Open ports indicate running services (e.g., port 80 for normal web traffic, 22 for SSH). 
-While web servers need certain ports open, any unnecessary open port increases the "attack surface". 
-Hackers often scan for open ports to find outdated or misconfigured services to exploit.
-"""
-
+# ==============================================================================
+# EDUCATIONAL DISCLAIMER
+# ==============================================================================
 DISCLAIMER = """
-==================================================
-WARNING: This tool is for educational and authorized 
-testing only. Unauthorized scanning is illegal.
-==================================================
+====================================================================
+[!] WARNING: ACADEMIC SECURITY RESEARCH TOOL
+This tool is explicitly designed for educational purposes and 
+authorized security auditing prior to production deployment.
+Unauthorized scanning of systems without explicit, written 
+consent is strictly illegal. The developer assumes no 
+liability for misuse.
+====================================================================
 """
 
-def log_finding(message):
-    """Appends a message to the scan report log."""
-    with open("scan_report.txt", "a", encoding="utf-8") as f:
-        f.write(message + "\n")
+# ==============================================================================
+# VULNERABILITY CONTEXT & EXPLANATIONS (Educational Component)
+# ==============================================================================
+EXPLANATIONS = {
+    "SQLI": """
+[!] SQL Injection (SQLi)
+Explanation: SQLi occurs when untrusted user input alters the backend database query.
+Risk Level: CRITICAL. Can lead to authentication bypass, data exfiltration, or data loss.
+Remediation: Use parameterized queries (Prepared Statements) or ORMs. Never concatenate input.
+""",
+    "XSS": """
+[!] Reflected Cross-Site Scripting (XSS)
+Explanation: XSS occurs when user input is reflected in the web page without sanitization.
+Risk Level: HIGH. Can lead to session hijacking, defacement, or malicious redirects.
+Remediation: Context-aware output encoding. Sanitize all input before rendering in HTML/JS.
+""",
+    "PORTS": """
+[*] Open Port Discovery
+Explanation: Open ports represent active services listening for connections.
+Risk Level: INFO to HIGH (depending on the service). Unnecessary open ports increase the attack surface.
+Remediation: Close unused ports via firewall (e.g., iptables, UFW) and restrict access to management ports.
+""",
+    "HEADERS": """
+[*] Missing Security Headers
+Explanation: HTTP Security Headers instruct the browser on how to behave securely.
+Risk Level: MEDIUM. Absence can facilitate XSS, clickjacking, and MITM attacks.
+Remediation: Configure the web server (Nginx/Apache) to include headers like CSP, HSTS, and X-Frame-Options.
+"""
+}
 
-def scan_sql_injection(url):
-    """
-    Checks for basic SQL Injection vulnerabilities by appending SQL payloads 
-    to the URL and checking the webpage response for database error messages.
-    """
-    print(f"\n[*] Starting SQL Injection scan on: {url}")
-    
-    # A list of simple SQL injection test payloads
-    payloads = [
-        "'", 
-        "\"", 
-        "1' OR '1'='1", 
-        "1\" OR \"1\"=\"1"
-    ]
-    
-    # Common database error strings that might leak when a query breaks
-    errors = [
-        "you have an error in your sql syntax",
-        "warning: mysql",
-        "unclosed quotation mark after the character string",
-        "quoted string not properly terminated",
-        "sql syntax error"
-    ]
-    
-    is_vulnerable = False
-    
-    for payload in payloads:
-        # If the URL already has parameters (contains '?'), append the payload.
-        # Otherwise, add a dummy parameter '?id=' to test the payload against.
-        if "?" in url:
-            target_url = f"{url}{payload}"
-        else:
-            target_url = f"{url}?id={payload}"
-            
+# ==============================================================================
+# CONFIGURATION & CONSTANTS
+# ==============================================================================
+COMMON_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.5112.79 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+    "EduSec-Scanner/1.0 (Academic Project; +https://github.com/student/edusec)"
+]
+
+SQLI_PAYLOADS = [
+    "'", '"', "1' OR '1'='1", "1\" OR \"1\"=\"1", "') OR ('1'='1", "admin' --"
+]
+SQLI_ERRORS = [
+    "you have an error in your sql syntax", "warning: mysql", "unclosed quotation mark",
+    "quoted string not properly terminated", "sql syntax error", "ora-00933",
+    "postgresql query failed", "sqlite3.operationalerror"
+]
+
+XSS_PAYLOADS = [
+    "<script>alert('XSS_Test')</script>",
+    "\"><script>alert(1)</script>",
+    "<img src=x onerror=alert('XSS')>"
+]
+
+COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 3306, 3389, 8080, 8443]
+
+COMMON_DIRECTORIES = [
+    "admin", "login", "css", "js", "images", "api", ".git", "backup", "config", "robots.txt"
+]
+
+SECURITY_HEADERS = [
+    "Strict-Transport-Security", "Content-Security-Policy", "X-Frame-Options",
+    "X-Content-Type-Options", "X-XSS-Protection"
+]
+
+
+# ==============================================================================
+# SCANNER CORE CLASS
+# ==============================================================================
+class WebScanner:
+    def __init__(self, target_url, delay=1.0, timeout=5, severity_filter="INFO"):
+        self.target_url = self._format_url(target_url)
+        self.parsed_url = urlparse(self.target_url)
+        self.hostname = self.parsed_url.hostname
+        self.delay = delay      # Rate limiting (seconds between requests)
+        self.timeout = timeout  # Request timeout
+        self.severity_filter = severity_filter # Feature expansion: filter results by severity
+        
+        # Determine base URL without parameters for directory enum
+        self.base_url = f"{self.parsed_url.scheme}://{self.hostname}{self.parsed_url.path}"
+        
+        self.results = {
+            "target": self.target_url,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "findings": []
+        }
+        
+    def _format_url(self, url):
+        """Ensures the URL has a valid scheme."""
+        if not url.startswith(("http://", "https://")):
+            print("[*] Notice: Scheme missing, defaulting to http://")
+            return "http://" + url
+        return url
+
+    def _get_headers(self):
+        """Rotates user agents to simulate realistic academic traffic."""
+        return {"User-Agent": random.choice(COMMON_USER_AGENTS)}
+
+    def _make_request(self, url, method="GET", allow_redirects=True):
+        """Centralized request handler with rate limiting and error handling."""
+        time.sleep(self.delay)  # Rate limiting
         try:
-            # Send a GET request to the target URL with the payload
-            response = requests.get(target_url, timeout=5)
-            
-            # Check if any common SQL error text appears in the response HTML
-            for error in errors:
-                if error.lower() in response.text.lower():
-                    print(f"\n[+] Vulnerability Found: Potential SQL Injection!")
-                    print(f"    Payload used: {payload}")
-                    print(f"    Target URL: {target_url}")
-                    print(SQLI_EXPLANATION)
-                    log_finding(f"[!] SQLi Detected with payload: {payload}")
-                    is_vulnerable = True
-                    return True # Stop after finding the first one to avoid spam
-                    
+            if method == "GET":
+                response = requests.get(url, headers=self._get_headers(), timeout=self.timeout, allow_redirects=allow_redirects)
+            elif method == "HEAD":
+                response = requests.head(url, headers=self._get_headers(), timeout=self.timeout, allow_redirects=allow_redirects)
+            return response
         except requests.exceptions.RequestException as e:
-            print(f"[-] Error connecting to {target_url}: {e}")
-            break # Stop trying payloads if the connection fails entirely
-            
-    if not is_vulnerable:
-        print("[-] No basic SQL Injection vulnerabilities found.")
-    return False
+            # We don't print every connection error to keep the console clean, handled by the caller.
+            return None
 
-def scan_xss(url):
-    """
-    Checks for basic Reflected Cross-Site Scripting (XSS) vulnerabilities by 
-    injecting a dummy script payload and checking if it's reflected directly in the HTML.
-    """
-    print(f"\n[*] Starting XSS scan on: {url}")
+    def log_finding(self, module, severity, title, detail, logic_explanation):
+        """Records a finding with structured metadata."""
+        finding = {
+            "module": module,
+            "severity": severity,
+            "title": title,
+            "detail": detail,
+            "explanation": logic_explanation
+        }
+        self.results["findings"].append(finding)
+        self.print_finding(finding)
+
+    def print_finding(self, finding):
+        """Outputs a finding cleanly to the console."""
+        print(f"\n[+] [{finding['severity']}] {finding['title']}")
+        print(f"    Detail: {finding['detail']}")
+
+    # --------------------------------------------------------------------------
+    # MODULES
+    # --------------------------------------------------------------------------
     
-    # A simple, relatively harmless XSS payload for testing
-    payload = "<script>alert('XSS_Test')</script>"
-    
-    # Append the payload similarly to the SQLi check
-    if "?" in url:
-        target_url = f"{url}{payload}"
-    else:
-        target_url = f"{url}?q={payload}"
+    def check_security_headers(self):
+        """
+        Analyzes HTTP response headers for missing security configurations.
+        """
+        print(f"\n[*] Starting Security Header Analysis on: {self.base_url}")
+        response = self._make_request(self.base_url, method="HEAD")
         
-    try:
-        response = requests.get(target_url, timeout=5)
+        if not response:
+            print("[-] Could not connect to target to analyze headers.")
+            return
+
+        missing_headers = []
+        for header in SECURITY_HEADERS:
+            # Case-insensitive check for header presence
+            if header.lower() not in (h.lower() for h in response.headers.keys()):
+                missing_headers.append(header)
+                
+        if missing_headers:
+            self.log_finding(
+                module="Headers",
+                severity="MEDIUM",
+                title="Missing Security Headers",
+                detail=f"Headers absent: {', '.join(missing_headers)}",
+                logic_explanation=EXPLANATIONS["HEADERS"]
+            )
+        else:
+            print("    [+] All standard security headers are present.")
+
+    def enumerate_directories(self):
+        """
+        Performs basic endpoint discovery to find hidden or administrative paths.
+        """
+        print(f"\n[*] Starting Directory/Endpoint Enumeration (Active Scan)")
+        print(f"    Base URL matching: {self.base_url}")
         
-        # If the exact unescaped script payload appears in the response, 
-        # the page might be vulnerable to Reflected XSS.
-        if payload in response.text:
-            print(f"\n[+] Vulnerability Found: Potential Cross-Site Scripting (XSS)!")
-            print(f"    Payload used: {payload}")
-            print(f"    Target URL: {target_url}")
-            print(XSS_EXPLANATION)
-            log_finding(f"[!] XSS Detected with payload: {payload}")
-            return True
+        found_dirs = []
+        for d in COMMON_DIRECTORIES:
+            target = urljoin(self.base_url + "/", d)
+            # Use HEAD request to save bandwidth since we only care about status codes
+            response = self._make_request(target, method="HEAD", allow_redirects=False)
             
-    except requests.exceptions.RequestException as e:
-         print(f"[-] Error connecting to {target_url}: {e}")
-         
-    print("[-] No basic XSS vulnerabilities found.")
-    return False
+            if response and response.status_code in [200, 301, 302, 401, 403]:
+                found_dirs.append(f"/{d} (HTTP {response.status_code})")
+                print(f"    [+] Found: {target} (Status: {response.status_code})")
+                
+        if found_dirs:
+             self.log_finding(
+                module="Enumeration",
+                severity="INFO",
+                title="Discovered Interesting Endpoints",
+                detail=f"Found: {', '.join(found_dirs)}",
+                logic_explanation="Hidden directories often contain backup files, admin panels, or configuration data left by developers."
+            )
+        else:
+            print("    [-] No common hidden directories found.")
 
-def scan_ports(target_url):
-    """
-    Performs a basic TCP port scan using Python sockets on common service ports.
-    """
-    print(f"\n[*] Starting Port Scan...")
-    print(PORT_EXPLANATION)
-    
-    # Extract just the hostname from the URL (e.g., 'http://example.com/page' -> 'example.com')
-    parsed_url = urlparse(target_url)
-    hostname = parsed_url.hostname or target_url 
-    hostname = hostname.replace("http://", "").replace("https://", "")
-    
-    # A list of common ports to check
-    # 21: FTP, 22: SSH, 23: Telnet, 25: SMTP, 53: DNS, 80: HTTP, 110: POP3, 443: HTTPS, 3306: MySQL
-    ports_to_scan = [21, 22, 23, 25, 53, 80, 110, 443, 3306, 8080]
-    open_ports = []
-    
-    try:
-        # Resolve the human-readable hostname to an IP address
-        target_ip = socket.gethostbyname(hostname)
-        print(f"[*] Resolved {hostname} to IP: {target_ip}")
-    except socket.gaierror:
-        print(f"[-] Error: Could not resolve hostname '{hostname}' to an IP address.")
-        return open_ports
+    def scan_sql_injection(self):
+        """
+        Advanced SQLi check injecting payloads and analyzing response variance.
+        """
+        print(f"\n[*] Starting SQL Injection Assessment on: {self.target_url}")
+        
+        is_vulnerable = False
+        for payload in SQLI_PAYLOADS:
+            # Determine injection point (existing parameter vs new dummy parameter)
+            if "?" in self.target_url:
+                target = f"{self.target_url}{payload}"
+            else:
+                target = f"{self.target_url}?id={payload}"
+                
+            response = self._make_request(target, method="GET")
+            if not response: continue
+            
+            # Check for generic SQL errors reflecting back in HTML
+            for err in SQLI_ERRORS:
+                if err in response.text.lower():
+                    self.log_finding(
+                        module="SQLi",
+                        severity="CRITICAL",
+                        title="Potential SQL Injection Detected",
+                        detail=f"Payload: {payload} | URL: {target}",
+                        logic_explanation=EXPLANATIONS["SQLI"]
+                    )
+                    is_vulnerable = True
+                    break # Stop looking at errors for this payload
+            
+            if is_vulnerable:
+                break # Stop sending payloads if we confirmed a vulnerability
 
-    for port in ports_to_scan:
-        # Create a new socket for each connection attempt using IPv4 (AF_INET) and TCP (SOCK_STREAM)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket.setdefaulttimeout(1) # Fast 1-second timeout so the scan doesn't take forever
+        if not is_vulnerable:
+            print("    [-] No obvious SQLi vulnerabilities detected based on error reflection.")
+
+    def scan_xss(self):
+        """
+        Advanced Reflected XSS check verifying if raw payloads are returned unescaped in HTML.
+        """
+        print(f"\n[*] Starting Reflected XSS Assessment on: {self.target_url}")
+        
+        is_vulnerable = False
+        for payload in XSS_PAYLOADS:
+            if "?" in self.target_url:
+                target = f"{self.target_url}{payload}"
+            else:
+                target = f"{self.target_url}?search={payload}"
+                
+            response = self._make_request(target, method="GET")
+            if not response: continue
+            
+            # If the exact payload appears in response AND content type is HTML
+            if response.headers.get("Content-Type", "").startswith("text/html"):
+                if payload in response.text:
+                    self.log_finding(
+                        module="XSS",
+                        severity="HIGH",
+                        title="Reflected Cross-Site Scripting (XSS) Detected",
+                        detail=f"Payload: {payload} | URL: {target}",
+                        logic_explanation=EXPLANATIONS["XSS"]
+                    )
+                    is_vulnerable = True
+                    break # Stop testing payloads once confirmed
+
+        if not is_vulnerable:
+            print("    [-] No Reflected XSS vulnerabilities detected.")
+
+    def scan_ports(self):
+        """
+        Socket-based port scanner resolving hostnames to IP addresses.
+        """
+        print(f"\n[*] Starting TCP Port Discovery on host: {self.hostname}")
         
         try:
-            # connect_ex returns 0 if the connection was successful (port open), 
-            # and an error indicator otherwise (port closed or filtered)
-            result = sock.connect_ex((target_ip, port))
-            if result == 0:
-                print(f"[+] Port {port:<4} is OPEN")
-                open_ports.append(port)
-            else:
-                print(f"[-] Port {port:<4} is CLOSED")
-        except socket.error:
-            print(f"[-] Port {port:<4} encountered an error.")
-        finally:
-            sock.close() # Always close the socket to free up resources
-        
-    if open_ports:
-        print(f"\n[!] Warning: Found {len(open_ports)} open port(s).")
-        print("    Ensure these services are properly secured and actively maintained.")
-    else:
-        print("\n[+] All scanned common ports appear to be closed or filtered.")
-        
-    return open_ports
+            target_ip = socket.gethostbyname(self.hostname)
+            print(f"    [*] Resolved {self.hostname} to IP: {target_ip}")
+        except socket.gaierror:
+            print(f"    [-] Error: Could not resolve hostname '{self.hostname}'")
+            return
 
-def main():
-    """
-    Main program loop. Gathers user input and calls the scanning functions.
-    """
-    print(DISCLAIMER)
-    print("==================================================")
-    print("      Beginner-Friendly Web Scanner Project       ")
-    print("==================================================\n")
+        open_ports = []
+        for port in COMMON_PORTS:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(0.5) # Fast timeout for network scans
+            try:
+                # 0 means connection succeeded
+                if sock.connect_ex((target_ip, port)) == 0:
+                    open_ports.append(port)
+                    print(f"    [+] Port {port:<4} is OPEN")
+            except Exception:
+                pass
+            finally:
+                sock.close()
+
+        if open_ports:
+             self.log_finding(
+                module="PortScan",
+                severity="INFO",
+                title="Open Network Ports Discovered",
+                detail=f"Ports: {', '.join(map(str, open_ports))}",
+                logic_explanation=EXPLANATIONS["PORTS"]
+            )
+        else:
+            print("    [-] All scanned ports appear filtered/closed.")
+
+    # --------------------------------------------------------------------------
+    # REPORTING
+    # --------------------------------------------------------------------------
     
-    # Setup CLI argument parsing
-    parser = argparse.ArgumentParser(description="Basic Web Vulnerability Scanner")
-    parser.add_argument("url", nargs="?", help="Target URL to scan (e.g., http://example.com)")
-    parser.add_argument("--sqli", action="store_true", help="Scan for SQL Injection")
-    parser.add_argument("--xss", action="store_true", help="Scan for Cross-Site Scripting (XSS)")
-    parser.add_argument("--ports", action="store_true", help="Scan common open ports")
-    parser.add_argument("--all", action="store_true", help="Run all scans (default if no specific flags used)")
+    def generate_report(self, output_format="txt"):
+        """Generates the scan report in either JSON or human-readable text."""
+        print("\n==================================================")
+        print("                 SCAN SUMMARY                     ")
+        print("==================================================")
+        
+        if not self.results["findings"]:
+            print("[+] Scan completed. No vulnerabilities detected.")
+        else:
+            for f in self.results["findings"]:
+                print(f"- [{f['severity']}] {f['module']}: {f['title']}")
+        
+        # Save to file
+        timestamp = datetime.datetime.now().strftime("%Y%md_%H%M%S")
+        if output_format.lower() == "json":
+            filename = f"scan_report_{timestamp}.json"
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(self.results, f, indent=4)
+        else:
+            filename = f"scan_report_{timestamp}.txt"
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(f"--- EDUCATIONAL SCAN REPORT ---\n")
+                f.write(f"Target: {self.results['target']}\n")
+                f.write(f"Time: {self.results['timestamp']}\n")
+                f.write("-" * 40 + "\n")
+                for finding in self.results["findings"]:
+                    f.write(f"[{finding['severity']}] {finding['module']} | {finding['title']}\n")
+                    f.write(f"Detail: {finding['detail']}\n")
+                    f.write(f"Context: {finding['explanation'].strip()}\n")
+                    f.write("-" * 40 + "\n")
+                    
+        print(f"\n[i] Full structured report saved to: {filename}")
+        print("[i] Hint: Future extension - Map output JSON structure to a SIEM ingest format or a verifiable Blockchain Logger.")
+
+# ==============================================================================
+# CLI ENTRY POINT
+# ==============================================================================
+def main():
+    print(DISCLAIMER)
+
+    # Robust CLI setup with argparse showcasing professional tool design
+    parser = argparse.ArgumentParser(
+        description="EduSec - Academic Web Vulnerability Scanner",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    
+    parser.add_argument("url", nargs="?", help="Target URL (e.g., http://example.com/page.php)")
+    
+    # Modules
+    module_group = parser.add_argument_group("Scanning Modules")
+    module_group.add_argument("--sqli", action="store_true", help="Run SQL Injection analysis")
+    module_group.add_argument("--xss", action="store_true", help="Run Reflected XSS analysis")
+    module_group.add_argument("--ports", action="store_true", help="Run common TCP port discovery")
+    module_group.add_argument("--headers", action="store_true", help="Analyze HTTP security headers")
+    module_group.add_argument("--enum", action="store_true", help="Enumerate common hidden directories")
+    module_group.add_argument("--all", action="store_true", help="Execute all scanning modules (default)")
+    
+    # Advanced Options
+    options_group = parser.add_argument_group("Advanced Settings")
+    options_group.add_argument("--delay", type=float, default=1.0, help="Delay between requests in seconds (Rate Limiting)")
+    options_group.add_argument("--output", choices=["txt", "json"], default="txt", help="Report format (default: txt)")
     
     args = parser.parse_args()
-    
-    # Get target from args or prompt the user if not provided
+
+    # Input validation
     target = args.url
     if not target:
-        target = input("Enter the target URL (e.g., http://testphp.vulnweb.com): ").strip()
+        target = input("Enter target URL: ").strip()
+        if not target:
+            print("[-] Error: Target URL is required.")
+            sys.exit(1)
+
+    # Initialize the scanner using OOP principles
+    scanner = WebScanner(target_url=target, delay=args.delay)
     
-    # Basic input validation to ensure a protocol is present
-    if not target.startswith("http://") and not target.startswith("https://"):
-        print("[*] Notice: Missing protocol. Automatically adding 'http://'")
-        target = "http://" + target
+    print(f"[*] Target initialized: {scanner.target_url}")
+    print(f"[*] Rate Limit Delay: {scanner.delay}s")
+    print(f"[*] Output Format: {args.output.upper()}")
+    
+    # Logic to handle module selection. Default to all if none explicitly chosen
+    run_all = args.all or not any([args.sqli, args.xss, args.ports, args.headers, args.enum])
+
+    if args.headers or run_all:
+        scanner.check_security_headers()
+    
+    if args.enum or run_all:
+        scanner.enumerate_directories()
         
-    print(f"\n[*] Target registered: {target}")
-    
-    # Determine which scans to run
-    # If no specific scan block is requested, run all of them
-    run_all = args.all or not (args.sqli or args.xss or args.ports)
-    
-    # Initialize findings dictionary
-    findings = {
-        "sqli": False,
-        "xss": False,
-        "open_ports": []
-    }
-    
-    print("[*] Initiating scan sequence...")
-    log_finding(f"\n--- New Scan Started: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-    log_finding(f"Target: {target}")
-    
-    # Execute the individual scanning modules based on flags
     if args.sqli or run_all:
-        findings["sqli"] = scan_sql_injection(target)
+        scanner.scan_sql_injection()
         
     if args.xss or run_all:
-        findings["xss"] = scan_xss(target)
+        scanner.scan_xss()
         
     if args.ports or run_all:
-        findings["open_ports"] = scan_ports(target)
-    
-    # --- Print and Log Summary ---
-    print("\n==================================================")
-    print("                 Scan Summary                     ")
-    print("==================================================")
-    
-    sqli_status = "Detected" if findings["sqli"] else "Not Detected"
-    xss_status = "Detected" if findings["xss"] else "Not Detected"
-    ports_status = ", ".join(map(str, findings["open_ports"])) if findings["open_ports"] else "None"
-    
-    print(f"- SQL Injection: {sqli_status}")
-    print(f"- XSS: {xss_status}")
-    print(f"- Open Ports: {ports_status}")
-    
-    log_finding("\nScan Summary:")
-    log_finding(f"- SQL Injection: {sqli_status}")
-    log_finding(f"- XSS: {xss_status}")
-    log_finding(f"- Open Ports: {ports_status}")
-    log_finding("--- Scan Complete ---\n")
-    
-    print("\n[i] Full report saved to 'scan_report.txt'")
-    print("==================================================")
+        scanner.scan_ports()
+
+    # Consolidate findings
+    scanner.generate_report(output_format=args.output)
+
 
 if __name__ == "__main__":
     main()
+
